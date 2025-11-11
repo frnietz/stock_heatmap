@@ -103,3 +103,6 @@ def compute_calendar_return(close_series: pd.Series, lookback_days: int) -> floa
     return (last_price / past_price - 1.0) * 100.0
 
 with st.spinner("Fetching data..."):
+    # fetch ~430 days to safely cover 1Y calendar lookback + holidays
+    stock_data = fetch_stock_data(bist30_tickers, max_days=430)
+    market_caps = fetch_market_caps(bist30_tickers)
