@@ -103,12 +103,15 @@ if returns:
         display_name = ticker.replace('.IS', '')
         
         # Get market cap (use a default if not available)
+        # Ensure market_cap is a simple number, not a Series
         market_cap = market_caps.get(ticker, 1000000)
+        if hasattr(market_cap, 'iloc'):  # Check if it's a Series
+            market_cap = market_cap.iloc[0] if len(market_cap) > 0 else 1000000
         
         heatmap_data.append({
             'Ticker': display_name,
             'Return (%)': round(ret, 2),
-            'Market Cap': market_cap
+            'Market Cap': float(market_cap)  # Ensure it's a float
         })
     
     df = pd.DataFrame(heatmap_data)
