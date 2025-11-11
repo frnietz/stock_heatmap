@@ -12,7 +12,7 @@ st.title("🇹🇷 BIST30 Stock Returns Heatmap (Size = Market Cap)")
 # -------- Intervals (calendar-day lookback) --------
 INTERVALS = {
     "1 Day": 1,
-    "5 Day": 5,        # replaces 1 Week (7d) per original request
+    "5 Day": 5,
     "1 Month": 30,
     "3 Months": 90,
     "6 Months": 180,
@@ -21,7 +21,7 @@ INTERVALS = {
 selected_interval = st.selectbox("Select Time Interval", list(INTERVALS.keys()), index=2)
 days = INTERVALS[selected_interval]
 
-# -------- BIST30 tickers (editable) --------
+# -------- BIST30 tickers --------
 bist30_tickers = [
     "AKBNK.IS", "ARCLK.IS", "ASELS.IS", "BIMAS.IS", "EKGYO.IS",
     "EREGL.IS", "FROTO.IS", "GARAN.IS", "HALKB.IS", "ISCTR.IS",
@@ -31,41 +31,35 @@ bist30_tickers = [
     "VAKBN.IS", "YKBNK.IS", "VESTL.IS", "AKSEN.IS", "TTKOM.IS"
 ]
 
-# -------- Caching (Streamlit 1.10+ uses cache_data) --------
+# -------- Cache selection --------
 if hasattr(st, "cache_data"):
     cache_dec = st.cache_data
 else:
-    cache_dec = st.cache  # fallback for older Streamlit
+    cache_dec = st.cache
 
 @cache_dec(ttl=3600, show_spinner=False)
 def fetch_stock_data(tickers: list[str], max_days: int) -> dict:
-    """Download daily adjusted close per ticker for (~max_days) days."""
     out = {}
     for t in tickers:
         try:
-            # pull enough days to cover lookback plus holidays
             df = yf.download(t, period=f"{max_days}d", interval="1d", auto_adjust=True, progress=False)
-            if not df.empty and "Close" in df.columns:
+            if not df.empty:
                 out[t] = df.copy()
-        except Exception as e:
-            # keep going even if one ticker fails
+        except Exception:
             out[t] = pd.DataFrame()
     return out
 
 @cache_dec(ttl=3600, show_spinner=False)
 def fetch_market_caps(tickers: list[str]) -> dict:
-    """Get market caps via fast_info first; fallback to info / shares*price."""
-    mktcaps = {}
+    caps = {}
     for t in tickers:
         cap = None
         try:
             tk = yf.Ticker(t)
-            # fast_info is faster and avoids some .info build-time deps
             try:
                 fi = dict(tk.fast_info)
                 cap = fi.get("market_cap")
                 if not cap:
-                    # fallback from .info (slower / sometimes flaky)
                     info = tk.info
                     cap = info.get("marketCap")
                     if not cap:
@@ -74,25 +68,21 @@ def fetch_market_caps(tickers: list[str]) -> dict:
                         if shares and price:
                             cap = float(shares) * float(price)
             except Exception:
-                # last-resort fallback
                 info = tk.info
                 cap = info.get("marketCap")
         except Exception:
             pass
-        # final guard
         if not cap or (isinstance(cap, (int, float)) and cap <= 0):
             cap = np.nan
-        mktcaps[t] = float(cap) if pd.notna(cap) else np.nan
-    return mktcaps
+        caps[t] = float(cap) if pd.notna(cap) else np.nan
+    return caps
 
 def compute_calendar_return(close_series: pd.Series, lookback_days: int) -> float | None:
-    """% return from last available close back to the last close on/before (last_date - lookback_days)."""
     if close_series is None or close_series.dropna().empty:
         return None
     s = close_series.dropna()
     last_dt = s.index.max()
     target_dt = last_dt - timedelta(days=lookback_days)
-    # pick last available close on/before target date
     past = s.loc[:target_dt].tail(1)
     if past.empty:
         return None
@@ -102,7 +92,55 @@ def compute_calendar_return(close_series: pd.Series, lookback_days: int) -> floa
         return None
     return (last_price / past_price - 1.0) * 100.0
 
+# ---------------- Fetching ----------------
 with st.spinner("Fetching data..."):
-    # fetch ~430 days to safely cover 1Y calendar lookback + holidays
     stock_data = fetch_stock_data(bist30_tickers, max_days=430)
     market_caps = fetch_market_caps(bist30_tickers)
+
+# ---------------- Compute returns ----------------
+rows = []
+for tkr, df in stock_data.items():
+    if df is None or df.empty:
+        continue
+    ret = compute_calendar_return(df["Close"], days)
+    cap = market_caps.get(tkr, np.nan)
+    if ret is not None and pd.notna(cap):
+        rows.append({
+            "Ticker": tkr.replace(".IS", ""),
+            "Return (%)": round(ret, 2),
+            "Market Cap": float(cap)
+        })
+
+if not rows:
+    st.error("No sufficient data to compute returns. Try another interval.")
+    st.stop()
+
+df = pd.DataFrame(rows)
+
+# ---------------- Plot ----------------
+max_abs = float(np.nanmax(np.abs(df["Return (%)"].values))) if not df.empty else 1.0
+if max_abs == 0:
+    max_abs = 0.01
+
+fig = px.treemap(
+    df,
+    path=[px.Constant("BIST30"), "Ticker"],
+    values="Market Cap",
+    color="Return (%)",
+    color_continuous_scale="RdYlGn",
+    range_color=[-max_abs, max_abs],
+    title=f"BIST30 Returns over {selected_interval} (Box Size = Market Cap)"
+)
+fig.update_traces(
+    hovertemplate="<b>%{label}</b><br>Return: %{color:.2f}%<br>Market Cap: %{value:,.0f}<extra></extra>"
+)
+fig.update_layout(margin=dict(t=30, l=0, r=0, b=0))
+st.plotly_chart(fig, use_container_width=True)
+
+# ---------------- Data table ----------------
+st.subheader("Underlying Data")
+st.dataframe(df.sort_values("Return (%)", ascending=False), use_container_width=True)
+
+st.markdown("---")
+st.caption("Returns use calendar-day lookbacks; market caps from Yahoo Finance (fast_info). Approximate values.")
+st.caption("Last update: " + dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
